@@ -790,8 +790,8 @@ class RenpySaveEditorGUI:
         entry.select_range(0, tk.END)
     
     def save_file(self):
-        if not self.current_file or not self.modified_variables:
-            messagebox.showinfo("Info", "No modifications to save.")
+        if not self.current_file:
+            messagebox.showinfo("Info", "No save file is loaded.")
             return
         
         # Get output filename
@@ -818,9 +818,13 @@ class RenpySaveEditorGUI:
             # Save to new file
             save_modified_save(self.current_file, filename, modified_log)
             
-            messagebox.showinfo("Success", 
+            if self.modified_variables:
+                result = f"Modified {len(self.modified_variables)} variable(s)."
+            else:
+                result = "No variables were changed; the save was copied unchanged."
+            messagebox.showinfo("Success",
                 f"Save file created successfully!\n\n"
-                f"Modified {len(self.modified_variables)} variable(s).\n"
+                f"{result}\n"
                 f"Saved to: {os.path.basename(filename)}")
             self.status_var.set(f"Saved: {os.path.basename(filename)}")
             
