@@ -7,6 +7,7 @@ Preserves save file integrity by patching values directly in pickle bytecode
 import sys
 import os
 import io
+import ast
 import zipfile
 import base64
 import struct
@@ -104,6 +105,15 @@ LONG1 = 0x8A
 LONG4 = 0x8B
 BINSTRING = 0x54
 SHORT_BINSTRING = 0x55
+BINPUT = 0x71
+LONG_BINPUT = 0x72
+BINGET = 0x68
+LONG_BINGET = 0x6A
+EMPTY_TUPLE = 0x29
+NEWOBJ = 0x81
+MARK = 0x28
+APPENDS = 0x65
+MEMOIZE = 0x94
 
 
 # ============================================================================
@@ -269,6 +279,10 @@ def _parse_value_at(data: bytes, pos: int):
         ln = data[pos + 1]
         if pos + 2 + ln <= n:
             return (data[pos + 2:pos + 2 + ln].decode('latin1', 'replace'), pos + 2 + ln, 'SHORT_BINSTRING')
+    if op == BINUNICODE and pos + 5 <= n:
+        ln = struct.unpack('<I', data[pos + 1:pos + 5])[0]
+        if pos + 5 + ln <= n:
+            return (data[pos + 5:pos + 5 + ln].decode('utf-8', 'replace'), pos + 5 + ln, 'BINUNICODE')
     if op == ord('S'):
         end = data.find(b'\n', pos)
         if end != -1:
@@ -309,6 +323,113 @@ def _encode_scalar(value):
     raise ValueError(f'Unsupported type for encoding: {type(value)}')
 
 
+def _skip_memo_put(data: bytes, pos: int) -> int:
+    """Skip pickle memo-write opcodes following a value."""
+    n = len(data)
+    while pos < n:
+        op = data[pos]
+        if op == BINPUT and pos + 2 <= n:
+            pos += 2
+        elif op == LONG_BINPUT and pos + 5 <= n:
+            pos += 5
+        elif op == MEMOIZE:
+            pos += 1
+        else:
+            break
+    return pos
+
+
+def _skip_memo_get(data: bytes, pos: int) -> int:
+    """Skip one pickle memo-read opcode and return the following position."""
+    n = len(data)
+    if pos < n and data[pos] == BINGET and pos + 2 <= n:
+        return pos + 2
+    if pos < n and data[pos] == LONG_BINGET and pos + 5 <= n:
+        return pos + 5
+    return pos
+
+
+def _key_value_positions(log_bytes: bytes, key: str):
+    """Yield positions immediately after each exact pickle-encoded key."""
+    key_b = key.encode('latin1')
+    i = 0
+    n = len(log_bytes)
+
+    while i < n:
+        idx = log_bytes.find(key_b, i)
+        if idx == -1:
+            return
+
+        matched = False
+        if idx >= 2 and log_bytes[idx - 2] == SHORT_BINSTRING:
+            matched = log_bytes[idx - 1] == len(key_b)
+        elif idx >= 5 and log_bytes[idx - 5] in (BINSTRING, BINUNICODE):
+            ln = struct.unpack('<I', log_bytes[idx - 4:idx])[0]
+            matched = ln == len(key_b)
+
+        if matched:
+            yield _skip_memo_put(log_bytes, idx + len(key_b))
+
+        i = idx + 1
+
+
+def _list_item_spans(log_bytes: bytes, value_pos: int):
+    """Return scalar item spans for a Ren'Py RevertableList value.
+
+    Ren'Py serializes RevertableList values as a NEWOBJ followed by MARK,
+    the list items, APPENDS, and a state dictionary. This deliberately only
+    accepts scalar list entries so edits cannot silently rewrite nested data.
+    """
+    pos = _skip_memo_get(log_bytes, value_pos)
+    n = len(log_bytes)
+
+    if pos + 2 > n or log_bytes[pos] != EMPTY_TUPLE or log_bytes[pos + 1] != NEWOBJ:
+        raise ValueError('The value is not a supported Ren\'Py RevertableList.')
+    pos += 2
+    pos = _skip_memo_put(log_bytes, pos)
+
+    if pos >= n or log_bytes[pos] != MARK:
+        raise ValueError('The RevertableList item section could not be located.')
+    pos += 1
+
+    spans = []
+    while pos < n and log_bytes[pos] != APPENDS:
+        parsed = _parse_value_at(log_bytes, pos)
+        if parsed is None:
+            raise ValueError('The list contains a nested or unsupported value.')
+        _, end_pos, _ = parsed
+        spans.append((pos, end_pos))
+        pos = _skip_memo_put(log_bytes, end_pos)
+
+    if pos >= n or log_bytes[pos] != APPENDS:
+        raise ValueError('The RevertableList terminator could not be located.')
+    return spans
+
+
+def patch_list_variable_in_log(log_bytes, key, new_value):
+    """Patch a fixed-length scalar RevertableList in pickle bytecode."""
+    if not isinstance(new_value, list):
+        raise ValueError(f'{key} must be edited as a list.')
+    if any(not isinstance(item, (bool, int, float, str)) for item in new_value):
+        raise ValueError(f'{key} contains a nested or unsupported list item.')
+
+    found = 0
+    for value_pos in _key_value_positions(log_bytes, key):
+        found += 1
+        spans = _list_item_spans(log_bytes, value_pos)
+        if len(spans) != len(new_value):
+            raise ValueError(f'{key} must contain exactly {len(spans)} items.')
+
+        patched = log_bytes
+        for (start, end), item in reversed(list(zip(spans, new_value))):
+            patched = patched[:start] + _encode_scalar(item) + patched[end:]
+        return patched
+
+    if found == 0:
+        raise KeyError(f'Variable not found in pickle bytecode: {key}')
+    raise KeyError(f'Variable {key!r} was found but its list encoding was not recognized.')
+
+
 # ============================================================================
 # Save file operations
 # ============================================================================
@@ -326,8 +447,10 @@ def load_save_variables(save_path):
             variables = {}
             for k, v in roots.items():
                 if isinstance(k, str) and k.startswith('store.'):
-                    # Only include simple editable types
-                    if isinstance(v, (int, float, bool, str)):
+                    # Include scalar values and simple Ren'Py lists. Lists
+                    # are edited element-by-element without re-pickling the
+                    # rest of the save file.
+                    if isinstance(v, (int, float, bool, str, _RevertableList)):
                         variables[k] = v
             return variables, log
     except Exception as e:
@@ -503,7 +626,7 @@ class RenpySaveEditorGUI:
         # Info label
         info_frame = ttk.Frame(self.root)
         info_frame.pack(fill=tk.X, padx=5, pady=5)
-        ttk.Label(info_frame, text="💡 Double-click a value to edit it. Only simple types (int, float, bool, str) can be edited.", 
+        ttk.Label(info_frame, text="💡 Double-click a value to edit it. Lists must contain only simple values and keep their original length.",
                  foreground='blue').pack(side=tk.LEFT)
     
     def load_file(self):
@@ -573,13 +696,13 @@ class RenpySaveEditorGUI:
         # See https://github.com/ricardol96/renpy_save_editor/issues/1
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Edit {key}")
-        dialog.geometry("500x200")
+        dialog.geometry("600x240")
         dialog.transient(self.root)
         
         ttk.Label(dialog, text=f"Variable: {key}").pack(pady=5)
         ttk.Label(dialog, text=f"Type: {value_type}").pack(pady=5)
         
-        ttk.Label(dialog, text="New Value:").pack(pady=5)
+        ttk.Label(dialog, text="New Value (lists use Python notation, e.g. [True, False]):").pack(pady=5)
         value_var = tk.StringVar(value=str(current_value))
         entry = ttk.Entry(dialog, textvariable=value_var, width=50)
         entry.pack(pady=5)
@@ -590,7 +713,18 @@ class RenpySaveEditorGUI:
                 original_value = self.variables[key]
                 
                 # Parse based on original type
-                if isinstance(original_value, bool):
+                if isinstance(original_value, _RevertableList):
+                    new_value = ast.literal_eval(new_value_str)
+                    if not isinstance(new_value, list):
+                        raise ValueError('The new value must be a list.')
+                    if len(new_value) != len(original_value):
+                        raise ValueError(
+                            f'This list must contain exactly {len(original_value)} items.'
+                        )
+                    if any(not isinstance(item, (bool, int, float, str))
+                           for item in new_value):
+                        raise ValueError('Nested lists and dictionaries are not supported yet.')
+                elif isinstance(original_value, bool):
                     new_value = new_value_str.lower() in ('true', '1', 'yes')
                 elif isinstance(original_value, int):
                     new_value = int(new_value_str)
@@ -644,7 +778,10 @@ class RenpySaveEditorGUI:
             # Apply all modifications to the log
             modified_log = self.original_log
             for key, value in self.modified_variables.items():
-                modified_log = patch_variable_in_log(modified_log, key, value)
+                if isinstance(self.variables[key], _RevertableList):
+                    modified_log = patch_list_variable_in_log(modified_log, key, value)
+                else:
+                    modified_log = patch_variable_in_log(modified_log, key, value)
             
             # Save to new file
             save_modified_save(self.current_file, filename, modified_log)
