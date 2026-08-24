@@ -13,6 +13,7 @@ import base64
 import struct
 import pickle
 import importlib
+import tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from io import BytesIO
@@ -527,26 +528,52 @@ def patch_variable_in_log(log_bytes, key, new_value):
 
 def save_modified_save(src_path, dst_path, modified_log):
     """Save modified log back to a new save file, regenerating signatures."""
-    with zipfile.ZipFile(src_path, 'r') as zin:
-        with zipfile.ZipFile(dst_path, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
-            for item in zin.infolist():
-                if item.filename == 'log':
-                    # Write modified log
-                    zi = zipfile.ZipInfo(item.filename)
-                    zi.date_time = item.date_time
-                    zi.compress_type = zipfile.ZIP_DEFLATED
-                    zi.external_attr = item.external_attr
-                    zout.writestr(zi, modified_log)
-                elif item.filename == 'signatures':
-                    # Regenerate signatures for the new log
-                    sig = _signatures_for_log(modified_log)
-                    zi = zipfile.ZipInfo(item.filename)
-                    zi.date_time = item.date_time
-                    zi.compress_type = zipfile.ZIP_DEFLATED
-                    zi.external_attr = item.external_attr
-                    zout.writestr(zi, sig)
-                else:
-                    zout.writestr(item, zin.read(item.filename))
+    source_path = os.path.abspath(src_path)
+    destination_path = os.path.abspath(dst_path)
+    same_file = os.path.normcase(os.path.realpath(source_path)) == os.path.normcase(os.path.realpath(destination_path))
+    temporary_path = None
+    output_path = destination_path
+
+    # Opening the destination with mode 'w' would truncate the source if the
+    # user chooses the same filename in Save As. Write beside it first, then
+    # replace it only after the source ZIP has been fully read and closed.
+    if same_file:
+        fd, temporary_path = tempfile.mkstemp(
+            prefix=os.path.basename(destination_path) + '.',
+            suffix='.tmp',
+            dir=os.path.dirname(destination_path) or None,
+        )
+        os.close(fd)
+        output_path = temporary_path
+
+    try:
+        with zipfile.ZipFile(source_path, 'r') as zin:
+            with zipfile.ZipFile(output_path, 'w', compression=zipfile.ZIP_DEFLATED) as zout:
+                for item in zin.infolist():
+                    if item.filename == 'log':
+                        # Write modified log
+                        zi = zipfile.ZipInfo(item.filename)
+                        zi.date_time = item.date_time
+                        zi.compress_type = zipfile.ZIP_DEFLATED
+                        zi.external_attr = item.external_attr
+                        zout.writestr(zi, modified_log)
+                    elif item.filename == 'signatures':
+                        # Regenerate signatures for the new log
+                        sig = _signatures_for_log(modified_log)
+                        zi = zipfile.ZipInfo(item.filename)
+                        zi.date_time = item.date_time
+                        zi.compress_type = zipfile.ZIP_DEFLATED
+                        zi.external_attr = item.external_attr
+                        zout.writestr(zi, sig)
+                    else:
+                        zout.writestr(item, zin.read(item.filename))
+
+        if same_file:
+            os.replace(output_path, destination_path)
+            temporary_path = None
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.remove(temporary_path)
 
 
 # ============================================================================
