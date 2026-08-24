@@ -721,6 +721,8 @@ class RenpySaveEditorGUI:
             return
         
         key, current_value, value_type = values
+        edit_value = self.modified_variables.get(key, self.variables[key])
+        original_value = self.variables[key]
         
         # Create edit dialog. Build widgets before grab_set(): on some Linux
         # window managers the Toplevel is not viewable yet, which raises
@@ -734,38 +736,56 @@ class RenpySaveEditorGUI:
         ttk.Label(dialog, text=f"Variable: {key}").pack(pady=5)
         ttk.Label(dialog, text=f"Type: {value_type}").pack(pady=5)
         
-        ttk.Label(dialog, text="New Value (lists use Python notation, e.g. [True, False]):").pack(pady=5)
-        value_var = tk.StringVar(value=str(current_value))
-        entry = ttk.Entry(dialog, textvariable=value_var, width=50)
-        entry.pack(pady=5)
+        entry = None
+        if isinstance(original_value, bool):
+            ttk.Label(dialog, text="Toggle value:").pack(pady=5)
+            value_var = tk.BooleanVar(value=bool(edit_value))
+            bool_label = tk.StringVar()
+
+            def update_bool_label():
+                bool_label.set("True" if value_var.get() else "False")
+
+            update_bool_label()
+            ttk.Checkbutton(
+                dialog,
+                textvariable=bool_label,
+                variable=value_var,
+                command=update_bool_label,
+            ).pack(pady=5)
+        else:
+            ttk.Label(dialog, text="New Value (lists use Python notation, e.g. [True, False]):").pack(pady=5)
+            value_var = tk.StringVar(value=repr(edit_value) if isinstance(edit_value, list) else str(edit_value))
+            entry = ttk.Entry(dialog, textvariable=value_var, width=50)
+            entry.pack(pady=5)
+            entry.focus()
+            entry.select_range(0, tk.END)
         
         def save_edit():
             try:
-                new_value_str = value_var.get()
-                original_value = self.variables[key]
-                
                 # Parse based on original type
-                if isinstance(original_value, _RevertableList):
-                    new_value = ast.literal_eval(new_value_str)
-                    if not isinstance(new_value, list):
-                        raise ValueError('The new value must be a list.')
-                    if len(new_value) != len(original_value):
-                        raise ValueError(
-                            f'This list must contain exactly {len(original_value)} items.'
-                        )
-                    if any(not isinstance(item, (bool, int, float, str))
-                           for item in new_value):
-                        raise ValueError('Nested lists and dictionaries are not supported yet.')
-                elif isinstance(original_value, bool):
-                    new_value = new_value_str.lower() in ('true', '1', 'yes')
-                elif isinstance(original_value, int):
-                    new_value = int(new_value_str)
-                elif isinstance(original_value, float):
-                    new_value = float(new_value_str)
-                elif isinstance(original_value, str):
-                    new_value = new_value_str
+                if isinstance(original_value, bool):
+                    new_value = value_var.get()
                 else:
-                    raise ValueError(f"Unsupported type: {type(original_value)}")
+                    new_value_str = value_var.get()
+                    if isinstance(original_value, _RevertableList):
+                        new_value = ast.literal_eval(new_value_str)
+                        if not isinstance(new_value, list):
+                            raise ValueError('The new value must be a list.')
+                        if len(new_value) != len(original_value):
+                            raise ValueError(
+                                f'This list must contain exactly {len(original_value)} items.'
+                            )
+                        if any(not isinstance(item, (bool, int, float, str))
+                               for item in new_value):
+                            raise ValueError('Nested lists and dictionaries are not supported yet.')
+                    elif isinstance(original_value, int):
+                        new_value = int(new_value_str)
+                    elif isinstance(original_value, float):
+                        new_value = float(new_value_str)
+                    elif isinstance(original_value, str):
+                        new_value = new_value_str
+                    else:
+                        raise ValueError(f"Unsupported type: {type(original_value)}")
                 
                 self.modified_variables[key] = new_value
                 self.populate_tree()
@@ -781,13 +801,13 @@ class RenpySaveEditorGUI:
         ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
         
         # Bind Enter key
-        entry.bind('<Return>', lambda e: save_edit())
-
         dialog.update_idletasks()
         dialog.wait_visibility()
         dialog.grab_set()
-        entry.focus_set()
-        entry.select_range(0, tk.END)
+        if entry is not None:
+            entry.bind('<Return>', lambda e: save_edit())
+            entry.focus_set()
+            entry.select_range(0, tk.END)
     
     def save_file(self):
         if not self.current_file:
@@ -809,6 +829,7 @@ class RenpySaveEditorGUI:
         try:
             # Apply all modifications to the log
             modified_log = self.original_log
+            modified_count = len(self.modified_variables)
             for key, value in self.modified_variables.items():
                 if isinstance(self.variables[key], _RevertableList):
                     modified_log = patch_list_variable_in_log(modified_log, key, value)
@@ -817,9 +838,21 @@ class RenpySaveEditorGUI:
             
             # Save to new file
             save_modified_save(self.current_file, filename, modified_log)
+
+            # Continue editing the file just written. Reloading preserves
+            # Ren'Py container types and prevents later saves from rebuilding
+            # from the older source file or reverting the chosen filename.
+            new_variables, new_log = load_save_variables(filename)
+            if not new_variables or new_log is None:
+                raise ValueError("The saved file could not be reloaded for continued editing.")
+            self.current_file = filename
+            self.original_log = new_log
+            self.variables = new_variables
+            self.modified_variables = {}
+            self.populate_tree()
             
-            if self.modified_variables:
-                result = f"Modified {len(self.modified_variables)} variable(s)."
+            if modified_count:
+                result = f"Modified {modified_count} variable(s)."
             else:
                 result = "No variables were changed; the save was copied unchanged."
             messagebox.showinfo("Success",

@@ -86,7 +86,7 @@ python renpy_save_editor.py
 4. **Type the new value**:
    - **Integers**: `100`, `-50`
    - **Floats**: `1.5`, `99.99`
-   - **Booleans**: `true`, `false`, `1`, `0`
+   - **Booleans**: click the True/False toggle
    - **Strings**: Any text
    - **Lists**: Python notation such as `[True, False]`; the list length must not change and nested values are not supported
 5. Click **Save** in the dialog
@@ -100,6 +100,9 @@ Modified variables are highlighted in yellow.
 3. **Important**: Either:
    - Save with a new name (recommended for testing)
    - Backup the original save first, then overwrite it
+
+Save As can also be used to make an unchanged copy. After saving, the newly
+written filename becomes the active file for subsequent saves.
 
 ### Loading Modified Saves in Game
 
