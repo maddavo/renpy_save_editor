@@ -666,11 +666,16 @@ class RenpySaveEditorGUI:
             
             value = self.modified_variables.get(key, self.variables[key])
             value_type = type(value).__name__
+            # Tkinter converts nested Python lists to Tcl list syntax when
+            # passed directly as a Treeview value (for example, "True True").
+            # Use Python notation so the displayed value is also valid input
+            # for the list editor: "[True, True]".
+            display_value = repr(value) if isinstance(value, (list, dict, set)) else str(value)
             
             # Highlight modified variables
             tags = ('modified',) if key in self.modified_variables else ()
             
-            self.tree.insert('', tk.END, values=(key, value, value_type), tags=tags)
+            self.tree.insert('', tk.END, values=(key, display_value, value_type), tags=tags)
         
         # Configure tag colors
         self.tree.tag_configure('modified', background='yellow')
