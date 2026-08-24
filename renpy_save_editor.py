@@ -590,6 +590,8 @@ class RenpySaveEditorGUI:
         self.original_log = None
         self.variables = {}
         self.modified_variables = {}
+        self.inline_editor = None
+        self.inline_editor_key = None
         
         self.create_widgets()
     
@@ -647,13 +649,14 @@ class RenpySaveEditorGUI:
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
-        # Bind double-click to edit
-        self.tree.bind('<Double-Button-1>', self.on_double_click)
+        # Edit directly in the value column. Booleans toggle on click; other
+        # supported values use an in-place entry overlay.
+        self.tree.bind('<Button-1>', self.on_tree_click)
         
         # Info label
         info_frame = ttk.Frame(self.root)
         info_frame.pack(fill=tk.X, padx=5, pady=5)
-        ttk.Label(info_frame, text="💡 Double-click a value to edit it. Lists must contain only simple values and keep their original length.",
+        ttk.Label(info_frame, text="💡 Click a value to edit it in place. Boolean values toggle directly; lists must keep their original length.",
                  foreground='blue').pack(side=tk.LEFT)
     
     def load_file(self):
@@ -681,6 +684,9 @@ class RenpySaveEditorGUI:
             messagebox.showerror("Error", f"Failed to load save file:\n{str(e)}")
     
     def populate_tree(self):
+        if self.inline_editor is not None:
+            self._cancel_inline_edit()
+
         # Clear existing items
         for item in self.tree.get_children():
             self.tree.delete(item)
@@ -709,105 +715,99 @@ class RenpySaveEditorGUI:
     
     def apply_filter(self):
         self.populate_tree()
-    
-    def on_double_click(self, event):
-        selection = self.tree.selection()
-        if not selection:
-            return
-        
-        item = selection[0]
-        values = self.tree.item(item, 'values')
-        if not values:
-            return
-        
-        key, current_value, value_type = values
-        edit_value = self.modified_variables.get(key, self.variables[key])
-        original_value = self.variables[key]
-        
-        # Create edit dialog. Build widgets before grab_set(): on some Linux
-        # window managers the Toplevel is not viewable yet, which raises
-        # TclError ("grab failed: window not viewable") and leaves an empty dialog.
-        # See https://github.com/ricardol96/renpy_save_editor/issues/1
-        dialog = tk.Toplevel(self.root)
-        dialog.title(f"Edit {key}")
-        dialog.geometry("600x240")
-        dialog.transient(self.root)
-        
-        ttk.Label(dialog, text=f"Variable: {key}").pack(pady=5)
-        ttk.Label(dialog, text=f"Type: {value_type}").pack(pady=5)
-        
-        entry = None
-        if isinstance(original_value, bool):
-            ttk.Label(dialog, text="Toggle value:").pack(pady=5)
-            value_var = tk.BooleanVar(value=bool(edit_value))
-            bool_label = tk.StringVar()
 
-            def update_bool_label():
-                bool_label.set("True" if value_var.get() else "False")
+    def _parse_inline_value(self, original_value, text):
+        """Parse an in-place edit while preserving the original value type."""
+        if isinstance(original_value, _RevertableList):
+            new_value = ast.literal_eval(text)
+            if not isinstance(new_value, list):
+                raise ValueError('The new value must be a list.')
+            if len(new_value) != len(original_value):
+                raise ValueError(
+                    f'This list must contain exactly {len(original_value)} items.'
+                )
+            if any(not isinstance(item, (bool, int, float, str))
+                   for item in new_value):
+                raise ValueError('Nested lists and dictionaries are not supported yet.')
+            return new_value
+        if isinstance(original_value, int):
+            return int(text)
+        if isinstance(original_value, float):
+            return float(text)
+        if isinstance(original_value, str):
+            return text
+        raise ValueError(f"Unsupported type: {type(original_value)}")
 
-            update_bool_label()
-            ttk.Checkbutton(
-                dialog,
-                textvariable=bool_label,
-                variable=value_var,
-                command=update_bool_label,
-            ).pack(pady=5)
+    def _store_modified_value(self, key, new_value):
+        """Store a value and remove the highlight if it matches the original."""
+        if new_value == self.variables[key]:
+            self.modified_variables.pop(key, None)
         else:
-            ttk.Label(dialog, text="New Value (lists use Python notation, e.g. [True, False]):").pack(pady=5)
-            value_var = tk.StringVar(value=repr(edit_value) if isinstance(edit_value, list) else str(edit_value))
-            entry = ttk.Entry(dialog, textvariable=value_var, width=50)
-            entry.pack(pady=5)
-            entry.focus()
-            entry.select_range(0, tk.END)
-        
-        def save_edit():
-            try:
-                # Parse based on original type
-                if isinstance(original_value, bool):
-                    new_value = value_var.get()
-                else:
-                    new_value_str = value_var.get()
-                    if isinstance(original_value, _RevertableList):
-                        new_value = ast.literal_eval(new_value_str)
-                        if not isinstance(new_value, list):
-                            raise ValueError('The new value must be a list.')
-                        if len(new_value) != len(original_value):
-                            raise ValueError(
-                                f'This list must contain exactly {len(original_value)} items.'
-                            )
-                        if any(not isinstance(item, (bool, int, float, str))
-                               for item in new_value):
-                            raise ValueError('Nested lists and dictionaries are not supported yet.')
-                    elif isinstance(original_value, int):
-                        new_value = int(new_value_str)
-                    elif isinstance(original_value, float):
-                        new_value = float(new_value_str)
-                    elif isinstance(original_value, str):
-                        new_value = new_value_str
-                    else:
-                        raise ValueError(f"Unsupported type: {type(original_value)}")
-                
-                self.modified_variables[key] = new_value
-                self.populate_tree()
-                dialog.destroy()
-                self.status_var.set(f"Modified: {key} = {new_value}")
-                
-            except ValueError as e:
-                messagebox.showerror("Invalid Value", f"Could not parse value:\n{str(e)}", parent=dialog)
-        
-        button_frame = ttk.Frame(dialog)
-        button_frame.pack(pady=10)
-        ttk.Button(button_frame, text="Save", command=save_edit).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
-        
-        # Bind Enter key
-        dialog.update_idletasks()
-        dialog.wait_visibility()
-        dialog.grab_set()
-        if entry is not None:
-            entry.bind('<Return>', lambda e: save_edit())
-            entry.focus_set()
-            entry.select_range(0, tk.END)
+            self.modified_variables[key] = new_value
+        self.populate_tree()
+        self.status_var.set(f"Modified: {key} = {new_value}")
+
+    def _cancel_inline_edit(self):
+        if self.inline_editor is not None:
+            self.inline_editor.destroy()
+        self.inline_editor = None
+        self.inline_editor_key = None
+
+    def _commit_inline_edit(self, event=None):
+        if self.inline_editor is None:
+            return 'break'
+
+        editor = self.inline_editor
+        key = self.inline_editor_key
+        try:
+            new_value = self._parse_inline_value(self.variables[key], editor.get())
+        except (ValueError, SyntaxError) as error:
+            messagebox.showerror(
+                "Invalid Value",
+                f"Could not parse value:\n{error}",
+                parent=self.root,
+            )
+            editor.focus_set()
+            return 'break'
+
+        self._cancel_inline_edit()
+        self._store_modified_value(key, new_value)
+        return 'break'
+
+    def _start_inline_edit(self, item, key):
+        self._cancel_inline_edit()
+        bbox = self.tree.bbox(item, '#2')
+        if not bbox:
+            return
+
+        current_value = self.modified_variables.get(key, self.variables[key])
+        display_value = repr(current_value) if isinstance(current_value, list) else str(current_value)
+        x, y, width, height = bbox
+        self.inline_editor = ttk.Entry(self.tree)
+        self.inline_editor.insert(0, display_value)
+        self.inline_editor.select_range(0, tk.END)
+        self.inline_editor.place(x=x, y=y, width=width, height=height)
+        self.inline_editor_key = key
+        self.inline_editor.bind('<Return>', self._commit_inline_edit)
+        self.inline_editor.bind('<FocusOut>', self._commit_inline_edit)
+        self.inline_editor.bind('<Escape>', lambda event: self._cancel_inline_edit())
+        self.inline_editor.focus_set()
+
+    def on_tree_click(self, event):
+        row = self.tree.identify_row(event.y)
+        column = self.tree.identify_column(event.x)
+        if not row or column != '#2':
+            return
+
+        self.tree.selection_set(row)
+        key = self.tree.item(row, 'values')[0]
+        original_value = self.variables[key]
+        current_value = self.modified_variables.get(key, original_value)
+        if isinstance(original_value, bool):
+            self._store_modified_value(key, not bool(current_value))
+        else:
+            self._start_inline_edit(row, key)
+        return 'break'
     
     def save_file(self):
         if not self.current_file:

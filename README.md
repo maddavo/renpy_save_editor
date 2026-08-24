@@ -82,14 +82,17 @@ python renpy_save_editor.py
 
 1. **Browse**: Scroll through the variable list
 2. **Filter**: Use the filter box to search (e.g., type "money" to find money-related variables)
-3. **Edit**: Double-click any value to open the edit dialog
+3. **Edit**: Click a value to edit it directly in the list; click a Boolean to toggle it
 4. **Type the new value**:
    - **Integers**: `100`, `-50`
    - **Floats**: `1.5`, `99.99`
    - **Booleans**: click the True/False toggle
    - **Strings**: Any text
    - **Lists**: Python notation such as `[True, False]`; the list length must not change and nested values are not supported
-5. Click **Save** in the dialog
+5. The edited value is applied when you commit the in-place edit
+
+For in-place text edits, press **Enter** or click elsewhere to commit, or press
+**Escape** to cancel.
 
 Modified variables are highlighted in yellow.
 
