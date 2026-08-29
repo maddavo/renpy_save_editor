@@ -567,12 +567,14 @@ class RenpySaveEditorGUI:
         
         key, current_value, value_type = values
         
-        # Create edit dialog
+        # Create edit dialog. Build widgets before grab_set(): on some Linux
+        # window managers the Toplevel is not viewable yet, which raises
+        # TclError ("grab failed: window not viewable") and leaves an empty dialog.
+        # See https://github.com/ricardol96/renpy_save_editor/issues/1
         dialog = tk.Toplevel(self.root)
         dialog.title(f"Edit {key}")
         dialog.geometry("500x200")
         dialog.transient(self.root)
-        dialog.grab_set()
         
         ttk.Label(dialog, text=f"Variable: {key}").pack(pady=5)
         ttk.Label(dialog, text=f"Type: {value_type}").pack(pady=5)
@@ -581,8 +583,6 @@ class RenpySaveEditorGUI:
         value_var = tk.StringVar(value=str(current_value))
         entry = ttk.Entry(dialog, textvariable=value_var, width=50)
         entry.pack(pady=5)
-        entry.focus()
-        entry.select_range(0, tk.END)
         
         def save_edit():
             try:
@@ -616,6 +616,12 @@ class RenpySaveEditorGUI:
         
         # Bind Enter key
         entry.bind('<Return>', lambda e: save_edit())
+
+        dialog.update_idletasks()
+        dialog.wait_visibility()
+        dialog.grab_set()
+        entry.focus_set()
+        entry.select_range(0, tk.END)
     
     def save_file(self):
         if not self.current_file or not self.modified_variables:
